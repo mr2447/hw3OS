@@ -50,7 +50,7 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
   p->nice = 3; //Default value for processes = 3
-  cprintf("Allocating process with PID %d, default nice value: %d\n", p->pid, p->nice);
+  //cprintf("Allocating process with PID %d, default nice value: %d\n", p->pid, p->nice);
 
   release(&ptable.lock);
 
@@ -279,36 +279,55 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
-void
-scheduler(void)
+void scheduler(void)
 {
   struct proc *p;
 
   for(;;){
-    // Enable interrupts on this processor.
-    sti();
-
-    // Loop over process table looking for process to run.
+    sti();  // Enable interrupts on this processor.
     acquire(&ptable.lock);
+
+    #if PRIORITY_SCHEDULER  // Priority Scheduling
+
+    struct proc *best_proc = 0; // Track the best process based on nice value
+    int min_nice = 6;  // Initialize to a value higher than max nice (1-5)
+
+    // Loop to find the RUNNABLE process with the lowest nice value
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-      swtch(&cpu->scheduler, p->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      proc = 0;
+      if(p->state == RUNNABLE && p->nice < min_nice){
+        min_nice = p->nice;
+        best_proc = p;
+      }
     }
-    release(&ptable.lock);
 
+    // If a process was found, switch to it
+    if (best_proc) {
+      proc = best_proc;
+      switchuvm(best_proc);
+      best_proc->state = RUNNING;
+      swtch(&cpu->scheduler, best_proc->context);
+      switchkvm();
+      proc = 0;  // Reset proc after process finishes or yields
+    }
+
+    #else  // Round Robin Scheduling
+
+    // Loop to find the first RUNNABLE process in Round Robin order
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state == RUNNABLE){
+        proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        swtch(&cpu->scheduler, p->context);
+        switchkvm();
+        proc = 0;  // Reset proc after process finishes or yields
+        break;  // Only run one process per scheduling cycle
+      }
+    }
+
+    #endif
+
+    release(&ptable.lock);
   }
 }
 
@@ -495,18 +514,18 @@ set_nice(int pid, int value)
   acquire(&ptable.lock); // Lock the process table
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
     if (p->pid == pid) { // Find process with the matching pid
-      cprintf("set_nice: Found process PID %d with current nice = %d\n", pid, p->nice); // Debug: Check current nice value
+      //cprintf("set_nice: Found process PID %d with current nice = %d\n", pid, p->nice); // Debug: Check current nice value
 
       int old_nice = p->nice; // Store the old nice value
       p->nice = value; // Set the new nice value
 
-      cprintf("set_nice: PID %d, old nice = %d, new nice = %d\n", pid, old_nice, p->nice); // Debug: Confirm the update
+      //cprintf("set_nice: PID %d, old nice = %d, new nice = %d\n", pid, old_nice, p->nice); // Debug: Confirm the update
 
       release(&ptable.lock); // Unlock the process table
       return old_nice; // Return the old nice value
     }
   }
   release(&ptable.lock); // Unlock if pid is not found
-  cprintf("set_nice: Process with PID %d not found\n", pid); // Debug: If process not found
+  //cprintf("set_nice: Process with PID %d not found\n", pid); // Debug: If process not found
   return -1; // Return -1 if the process was not found
 }
