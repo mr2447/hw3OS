@@ -49,6 +49,8 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->nice = 3; //Default value for processes = 3
+  cprintf("Allocating process with PID %d, default nice value: %d\n", p->pid, p->nice);
 
   release(&ptable.lock);
 
@@ -158,6 +160,7 @@ fork(void)
   np->sz = proc->sz;
   np->parent = proc;
   *np->tf = *proc->tf;
+  np->nice = proc->nice;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -482,4 +485,28 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+// In proc.c
+int
+set_nice(int pid, int value)
+{
+  struct proc *p;
+  acquire(&ptable.lock); // Lock the process table
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid) { // Find process with the matching pid
+      cprintf("set_nice: Found process PID %d with current nice = %d\n", pid, p->nice); // Debug: Check current nice value
+
+      int old_nice = p->nice; // Store the old nice value
+      p->nice = value; // Set the new nice value
+
+      cprintf("set_nice: PID %d, old nice = %d, new nice = %d\n", pid, old_nice, p->nice); // Debug: Confirm the update
+
+      release(&ptable.lock); // Unlock the process table
+      return old_nice; // Return the old nice value
+    }
+  }
+  release(&ptable.lock); // Unlock if pid is not found
+  cprintf("set_nice: Process with PID %d not found\n", pid); // Debug: If process not found
+  return -1; // Return -1 if the process was not found
 }
