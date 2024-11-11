@@ -7,15 +7,13 @@
 #include "proc.h"
 #include "spinlock.h"
 
-#define PRIORITY_SCHEDULER 1  // Set to 1 for priority scheduling, 0 for round-robin
+#define PRIORITY_SCHEDULER 0  // Set to 1 for priority scheduling, 0 for round-robin
 #define MAX_PRIORITY 5        // Maximum priority level
 
 struct {
-    struct spinlock lock;
-    struct proc proc[NPROC];
-    #if PRIORITY_SCHEDULER
-    struct proc *priority_heads[MAX_PRIORITY];  // Head of each priority queue
-    #endif
+  struct spinlock lock;
+  struct proc proc[NPROC];
+  struct proc *priority_head[MAX_PRIORITY]; // Tail pointers for circular lists
 } ptable;
 
 static struct proc *initproc;
@@ -26,50 +24,61 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
-void 
-pinit(void) {
-    initlock(&ptable.lock, "ptable");
-
-    #if PRIORITY_SCHEDULER
-    for (int i = 0; i < MAX_PRIORITY; i++) {
-        ptable.priority_heads[i] = 0;
+void
+pinit(void)
+{
+  initlock(&ptable.lock, "ptable");
+  #if PRIORITY_SCHEDULER
+    int i;
+    for (i = 0; i < MAX_PRIORITY; i++) {
+        ptable.priority_head[i] = 0;  // Initialize all heads to NULL
     }
     #endif
 }
 
 #if PRIORITY_SCHEDULER
 void add_to_priority_queue(struct proc *p) {
-    int priority = p->nice;
-    struct proc **head = &ptable.priority_heads[priority - 1];
+  int priority_index = p->nice - 1;   // Determine the appropriate priority queue
+  struct proc *head = ptable.priority_head[priority_index];
 
-    if (*head == 0) {  // Empty list
-        *head = p;
-        p->next = p;
-        p->prev = p;
-    } else {  // Non-empty list, add p to the end
-        struct proc *tail = (*head)->prev;
-        tail->next = p;
-        p->prev = tail;
-        p->next = *head;
-        (*head)->prev = p;
-    }
+  if (head == 0) {
+    // If the queue is empty, create a self-loop
+    p->next = p->prev = p;
+    ptable.priority_head[priority_index] = p;
+  } else {
+    // Insert the process after the tail in the circular list
+    p->next = head;    // New process points to head
+    p->prev = head->prev;   //Prev of p is tail
+    head->prev->next = p; //Tail's next points to new process
+    head->prev = p;    // Head's prev points to new process
+    //P is now tail
+  }
 }
-
 void remove_from_priority_queue(struct proc *p) {
-    if (p->next == p) {  // Single node, detach it
-        int priority = p->nice;
-        ptable.priority_heads[priority - 1] = 0;
-    } else {  // Multi-node, adjust neighbors
-        p->prev->next = p->next;
-        p->next->prev = p->prev;
+  if (p->next == 0 && p->prev == 0) {
+    //cprintf("Process %d already removed from priority queue\n", p->pid);
+    return; // Process is already removed; do nothing
+  }
+   //cprintf("Removing process %d from priority queue\n", p->pid);
+  int priority_index = p->nice - 1;
+  struct proc *head = ptable.priority_head[priority_index];
 
-        // Update head if necessary
-        if (ptable.priority_heads[p->nice - 1] == p) {
-            ptable.priority_heads[p->nice - 1] = p->next;
-        }
+  if (p->next == p) {  // Only one process in the queue
+    //cprintf("Only process in priority queue, removing %d\n", p->pid);
+    ptable.priority_head[priority_index] = 0;
+  } else {
+    //cprintf("Detaching process %d from priority queue\n", p->pid);
+    p->prev->next = p->next;
+    p->next->prev = p->prev;
+    if (p == head) {
+      ptable.priority_head[priority_index] = p->next; // Update head to next process if p is head
     }
-    p->next = 0;
-    p->prev = 0;
+  }
+
+  // Clean up pointers for the removed process
+  p->next = 0;
+  p->prev = 0;
+   //cprintf("Process %d removed successfully\n", p->pid);
 }
 #endif
 
@@ -97,7 +106,6 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
   p->nice = 3; //Default value for processes = 3
-  //cprintf("Allocating process with PID %d, default nice value: %d\n", p->pid, p->nice);
 
   release(&ptable.lock);
 
@@ -159,9 +167,8 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
-
   #if PRIORITY_SCHEDULER
-  add_to_priority_queue(p);  // Add to the priority queue if priority scheduling is enabled
+  add_to_priority_queue(p); //Add process to queue
   #endif
 
   release(&ptable.lock);
@@ -228,9 +235,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
-
   #if PRIORITY_SCHEDULER
-  add_to_priority_queue(np);  // Add to the priority queue if priority scheduling
+  add_to_priority_queue(np);
   #endif
 
   release(&ptable.lock);
@@ -266,7 +272,10 @@ exit(void)
   acquire(&ptable.lock);
 
   // Parent might be sleeping in wait().
+   // Notify that the process is exiting
+  //cprintf("Process %d exiting\n", proc->pid);
   wakeup1(proc->parent);
+  //cprintf("Process %d woke up parent %d\n", proc->pid, proc->parent->pid);
 
   // Pass abandoned children to init.
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
@@ -274,14 +283,20 @@ exit(void)
       p->parent = initproc;
       if(p->state == ZOMBIE)
         wakeup1(initproc);
+        //cprintf("Process %d woke up init parent %d\n", proc->pid, proc->parent->pid);
     }
   }
-  
-  // Jump into the scheduler, never to return.
+
+  // Remove the process from the priority queue
   #if PRIORITY_SCHEDULER
   remove_from_priority_queue(proc);
   #endif
+  //cprintf("Process %d removed from priority queue\n", proc->pid);
+
+
+  // Jump into the scheduler, never to return.
   proc->state = ZOMBIE;
+  //cprintf("Process %d set to ZOMBIE\n", proc->pid);
   sched();
   panic("zombie exit");
 }
@@ -303,6 +318,8 @@ wait(void)
         continue;
       havekids = 1;
       if(p->state == ZOMBIE){
+        //cprintf("Reaping ZOMBIE process %d (parent %d)\n", p->pid, proc->pid);
+        //remove_from_priority_queue(p); //redundant check remove if problems
         // Found one.
         pid = p->pid;
         kfree(p->kstack);
@@ -325,6 +342,7 @@ wait(void)
     }
 
     // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+    //cprintf("Parent %d going to sleep in wait()\n", proc->pid);
     sleep(proc, &ptable.lock);  //DOC: wait-sleep
   }
 }
@@ -344,36 +362,53 @@ void scheduler(void)
   for(;;){
     sti();  // Enable interrupts on this processor.
     acquire(&ptable.lock);
-    //cprintf("priority")
 
     #if PRIORITY_SCHEDULER  // Priority Scheduling
+    int priority;
+    int found_runnable = 0;
+       // Iterate over each priority level from highest (1) to lowest (MAX_PRIORITY)
+    for (priority = 0; priority < MAX_PRIORITY; priority++) {
+      struct proc *head = ptable.priority_head[priority];
+      
+      // Skip to the next priority level if this one is empty
+      if (!head) continue;
 
-    // Iterate over priority levels from highest to lowest
-    for (int i = 0; i < MAX_PRIORITY; i++) {
-        p = ptable.priority_heads[i];
-          if (p) {
-              do {
-                  if (p->state == RUNNABLE) {
-                      proc = p;
-                      switchuvm(p);
-                      p->state = RUNNING;
-                      swtch(&cpu->scheduler, p->context);
-                      switchkvm();
-                      proc = 0;
+      p = head;
 
-                      // If still runnable, reinsert into the priority queue
-                      if (p->state == RUNNABLE) {
-                          remove_from_priority_queue(p);
-                          add_to_priority_queue(p);
-                      }
-                      break;  // Run one process per scheduling cycle
-                  }
-                  p = p->next;  // Continue in circular list
-              } while (p != ptable.priority_heads[i]);  // Full loop back to start
-          }
-      }
+      do {
+        if (p->state == RUNNABLE) {
+          // Found a RUNNABLE process; schedule it
+          found_runnable = 1;
+          ptable.priority_head[priority] = p->next;  // Rotate the queue
+          //cprintf("Scheduling process %d with priority %d\n", p->pid, p->nice);
+
+          proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&cpu->scheduler, p->context);
+          switchkvm();
+
+          // Clear `proc` after it runs
+          proc = 0;
+          break;
+        }
+        p = p->next;
+      } while (p != head);  // Complete a full rotation if needed
+
+      if(found_runnable) break;  // Exit priority loop if a process was scheduled
+    }
+
+    // // If no RUNNABLE process was found, put the CPU in an idle state
+    // if (!found_runnable) {
+    //   //cprintf("No RUNNABLE processes found, CPU going idle\n");
+    //   release(&ptable.lock);
+    //   asm volatile("hlt");  // Halt CPU until the next interrupt
+    //   continue;  // Re-check processes after waking up
+    // }
+
 
     #else  // Round Robin Scheduling
+
     // Loop to find the first RUNNABLE process in Round Robin order
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state == RUNNABLE){
@@ -414,6 +449,7 @@ sched(void)
   if(readeflags()&FL_IF)
     panic("sched interruptible");
   intena = cpu->intena;
+  //cprintf("Switching out process %d\n", proc->pid);
   swtch(&proc->context, cpu->scheduler);
   cpu->intena = intena;
 }
@@ -424,11 +460,6 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
-
-  #if PRIORITY_SCHEDULER
-  add_to_priority_queue(proc);  // Reinserts the process into the priority queue
-  #endif
-
   sched();
   release(&ptable.lock);
 }
@@ -494,20 +525,16 @@ sleep(void *chan, struct spinlock *lk)
 //PAGEBREAK!
 // Wake up all processes sleeping on chan.
 // The ptable lock must be held.
-static void 
-wakeup1(void *chan) {
-    struct proc *p;
+static void
+wakeup1(void *chan)
+{
+  struct proc *p;
 
-    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-        if (p->state == SLEEPING && p->chan == chan) {
-            p->state = RUNNABLE;
-
-            #if PRIORITY_SCHEDULER
-            add_to_priority_queue(p);  // Add to priority queue only if process is now RUNNABLE
-            #endif
-        }
-    }
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    if(p->state == SLEEPING && p->chan == chan)
+      p->state = RUNNABLE;
 }
+
 // Wake up all processes sleeping on chan.
 void
 wakeup(void *chan)
@@ -520,36 +547,24 @@ wakeup(void *chan)
 // Kill the process with the given pid.
 // Process won't exit until it returns
 // to user space (see trap in trap.c).
-int 
-kill(int pid) {
-    struct proc *p;
+int
+kill(int pid)
+{
+  struct proc *p;
 
-    acquire(&ptable.lock);
-    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-        if (p->pid == pid) {
-            p->killed = 1;
-
-            // If process is sleeping, change its state to RUNNABLE and add to priority queue
-            if (p->state == SLEEPING) {
-                p->state = RUNNABLE;
-                #if PRIORITY_SCHEDULER
-                add_to_priority_queue(p);
-                #endif
-            }
-
-            // If the process is still RUNNABLE, remove from priority queue to prevent scheduling
-            if (p->state == RUNNABLE) {
-                #if PRIORITY_SCHEDULER
-                remove_from_priority_queue(p);
-                #endif
-            }
-
-            release(&ptable.lock);
-            return 0;
-        }
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->pid == pid){
+      p->killed = 1;
+      // Wake process from sleep if necessary.
+      if(p->state == SLEEPING)
+        p->state = RUNNABLE;
+      release(&ptable.lock);
+      return 0;
     }
-    release(&ptable.lock);
-    return -1;
+  }
+  release(&ptable.lock);
+  return -1;
 }
 
 //PAGEBREAK: 36
@@ -579,7 +594,8 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("%d %s %s", p->pid, state, p->name);
+    // Print the process ID, state, name, and priority (nice value)
+    cprintf("%d %s %s priority:%d", p->pid, state, p->name, p->nice);
     if(p->state == SLEEPING){
       getcallerpcs((uint*)p->context->ebp+2, pc);
       for(i=0; i<10 && pc[i] != 0; i++)
@@ -590,32 +606,34 @@ procdump(void)
 }
 
 // In proc.c
-#if PRIORITY_SCHEDULER
-int 
-set_nice(int pid, int value) {
-    struct proc *p;
-    acquire(&ptable.lock);
+int
+set_nice(int pid, int value)
+{
+  struct proc *p;
+  acquire(&ptable.lock); // Lock the process table
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid) { // Find process with the matching pid
+      //cprintf("set_nice: Found process PID %d with current nice = %d\n", pid, p->nice); // Debug: Check current nice value
 
-    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-        if (p->pid == pid) {
-            // Update the priority only if it has changed
-            if (p->nice != value) {
-                // If the process is currently runnable, update its position in the queue
-                if (p->state == RUNNABLE) {
-                    remove_from_priority_queue(p);
-                    p->nice = value;
-                    add_to_priority_queue(p);
-                } else {
-                    // If not runnable, just update the nice value
-                    p->nice = value;
-                }
-            }
-            release(&ptable.lock);
-            return p->nice;
-        }
+      int old_nice = p->nice; // Store the old nice value
+
+      #if PRIORITY_SCHEDULER
+      remove_from_priority_queue(p);  // Remove the process from its current priority queue
+
+      p->nice = value; // Set the new nice value
+      
+      add_to_priority_queue(p); // Reinsert the process into the new priority queue based on updated nice value
+      #else
+      p->nice = value;
+      #endif
+
+      //cprintf("set_nice: PID %d, old nice = %d, new nice = %d\n", pid, old_nice, p->nice); // Debug: Confirm the update
+
+      release(&ptable.lock); // Unlock the process table
+      return old_nice; // Return the old nice value
     }
-
-    release(&ptable.lock);
-    return -1;  // Return -1 if the process with specified PID is not found
+  }
+  release(&ptable.lock); // Unlock if pid is not found
+  //cprintf("set_nice: Process with PID %d not found\n", pid); // Debug: If process not found
+  return -1; // Return -1 if the process was not found
 }
-#endif
