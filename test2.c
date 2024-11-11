@@ -1,37 +1,28 @@
-
 #include "types.h"
+#include "stat.h"
 #include "user.h"
 
-void priority_test() {
+int main() {
+    int pid;
+    int nice_values[5] = {5, 3, 2, 1, 4}; // Non-sequential nice values
     int i;
-    int pid = fork();
-
-    if (pid == 0) {
-        // Child process with low priority
-        nice(getpid(), 5);  // Set highest nice value (lowest priority)
-        for (i = 0; i < 5; i++) {
-            printf(1, "Child process (low priority) running\n");
-            sleep(5);
+    volatile int count;
+    nice(getpid(), 1);
+    for (i = 0; i < 5; i++) {
+        pid = fork();
+        if (pid == 0) {
+            // Child process: Longer, CPU-bound task
+            for (count = 0; count < 100; count++)
+                printf(1, "[Child PID %d] running now with nice value %d\n", getpid(), nice_values[i]);
+            printf(1, "[Child PID %d] Completed with assigned nice value %d\n", getpid(), nice_values[i]);
+            exit();
+        } else {
+            // Parent process: Set the nice value of the child
+            printf(1, "[Parent PTD %d] setting child to %d\n",getpid(), nice_values[i]);
+            nice(pid, nice_values[i]);
         }
-        exit();
-    } else {
-        // Parent process with high priority
-        nice(getpid(), 1);  // Set lowest nice value (highest priority)
-        for (i = 0; i < 5; i++) {
-            printf(1, "Parent process (high priority) running\n");
-            sleep(5);
-        }
-        wait();
     }
-}
-
-int
-main(void)
-{
-    // Other user tests...
-    printf(1, "Running priority test:\n");
-    priority_test();
-
-    printf(1, "All tests passed!\n");
+    
+    while (wait() != -1) {}
     exit();
 }
